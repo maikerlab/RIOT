@@ -1,19 +1,20 @@
+use alloc::borrow::ToOwned;
 use rs_matter::error::Error as MatterError;
 use riot_wrappers::gnrc::Netif;
 use embedded_nal_async::{Ipv6Addr, SocketAddr, UnconnectedUdp};
 
 use embassy_futures::select::{Either, select};
-use riot_wrappers::mutex::Mutex;
+use riot_wrappers::mutex::{Mutex, MutexGuard};
 use riot_wrappers::ztimer;
 use riot_wrappers::socket_embedded_nal_async_udp::UnconnectedUdpSocket;
 use rs_matter::error::{Error, ErrorCode};
-use rs_matter::transport::network::{UdpReceive, UdpSend};
 use embassy_sync::{
     signal::Signal,
     blocking_mutex::raw::NoopRawMutex
 };
 use embedded_hal_async::delay::DelayNs;
 use log::{debug, error, warn};
+use rs_matter::transport::network::{Address, NetworkReceive, NetworkSend};
 
 pub type Notification = Signal<NoopRawMutex, ()>;
 
@@ -35,10 +36,10 @@ impl UdpSocketWrapper {
     }
 }
 
-impl UdpSend for &UdpSocketWrapper {
-    async fn send_to(&mut self, data: &[u8], addr: SocketAddr) -> Result<(), Error> {
+impl NetworkSend for &UdpSocketWrapper {
+    async fn send_to(&mut self, data: &[u8], addr: Address) -> Result<(), Error> {
         debug!("(UDP) sending {} bytes to {:?}", data.len(), &addr);
-        if addr.is_ipv4() {
+        if addr.unwrap_udp().is_ipv4() {
             // IPv4 not supported on RIOT OS
             warn!("(UDP) Is IPv4 -> ignore send!");
             return Ok(());
@@ -47,19 +48,29 @@ impl UdpSend for &UdpSocketWrapper {
         self.release_socket_notification.signal(());
         ztimer::Delay.delay_ms(10).await;
         let mut sock = self.socket.try_lock().expect("receiver should have ensured that this mutex is free");
-        sock.send(self.local_addr, addr, data)
+        sock.send(self.local_addr, addr.unwrap_udp(), data)
             .await
             .map_err(|_| Error::new(ErrorCode::StdIoError))?;
         // tell receiver sending is finished
         drop(sock);
+        debug!("send_to finished!");
         self.socket_released_notification.signal(());
         Ok(())
     }
 }
 
-impl UdpReceive for &UdpSocketWrapper {
-    async fn recv_from(&mut self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), Error> {
-        loop {
+impl NetworkReceive for &UdpSocketWrapper {
+    async fn wait_available(&mut self) -> Result<(), MatterError> {
+        debug!("wait_available...");
+        self.release_socket_notification.signal(());
+        ztimer::Delay.delay_ms(10).await;
+        //self.socket_released_notification.wait().await;
+        debug!("wait_available -> is available now!");
+        Ok(())
+    }
+
+    async fn recv_from(&mut self, buffer: &mut [u8]) -> Result<(usize, Address), Error> {
+       loop {
             let mut sock = self.socket.try_lock().expect("sender should have ensured that this mutex is free");
             match select(
                 self.release_socket_notification.wait(),
@@ -78,7 +89,10 @@ impl UdpReceive for &UdpSocketWrapper {
                             debug!("(UDP) received {} bytes from {:?} to {:?}", bytes_recvd, &remote_addr, &local_addr);
                             if remote_addr.is_ipv4() {
                                 warn!("(UDP) Is IPv4 -> ignoring receive data!");
-                                return Ok((bytes_recvd, remote_addr));
+                                drop(sock);
+                                debug!("recv_from finished -> OK but didn't handle because of IPv4 address");
+                                self.socket_released_notification.signal(());
+                                return Ok((0, Address::Udp(remote_addr)));
                             }
                         }
                         Err(_) => { error!("Error during UDP receive!"); }
@@ -87,7 +101,10 @@ impl UdpReceive for &UdpSocketWrapper {
                     let (bytes_recvd, remote_addr) = res.map(|(bytes_recvd, _, remote_addr)|
                         (bytes_recvd, remote_addr)
                     ).map_err(|_| Error::new(ErrorCode::StdIoError))?;
-                    return Ok((bytes_recvd, remote_addr));
+                    drop(sock);
+                    debug!("recv_from finished!");
+                    self.socket_released_notification.signal(());
+                    return Ok((bytes_recvd, Address::Udp(remote_addr)));
                 }
             }
         }
@@ -100,7 +117,7 @@ pub mod utils {
     use log::info;
     use riot_sys::inline::gnrc_netapi_set;
     use riot_sys::{netopt_t_NETOPT_IPV6_GROUP, size_t};
-    use rs_matter::mdns::builtin::MDNS_IPV6_BROADCAST_ADDR;
+    use rs_matter::mdns::MDNS_IPV6_BROADCAST_ADDR;
 
     pub fn get_ipv6_address(ifc: &Netif) -> Option<Ipv6Addr> {
         let all_addresses = ifc.ipv6_addrs();

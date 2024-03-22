@@ -30,7 +30,7 @@ use core::cell::Cell;
 
 // external crates
 use static_cell::StaticCell;
-use embedded_nal_async::{Ipv4Addr, UdpStack as _};
+use embedded_nal_async::{Ipv4Addr, Ipv6Addr, UdpStack as _};
 use embedded_alloc::Heap;
 use embedded_hal::delay::DelayNs as _;
 use log::{debug, info, error, LevelFilter, warn};
@@ -50,9 +50,9 @@ use riot_wrappers::saul::{ActuatorClass, Class, Phydat, RegistryEntry};
 #[allow(unused_variables)]
 #[allow(dead_code)]
 extern crate rs_matter;
+extern crate alloc;
 
 use rs_matter::{CommissioningData, MATTER_PORT};
-use rs_matter::transport::network::UdpBuffers;
 use rs_matter::transport::core::{PacketBuffers, MATTER_SOCKET_BIND_ADDR};
 use rs_matter::core::Matter;
 use rs_matter::data_model::{
@@ -65,8 +65,7 @@ use rs_matter::data_model::{
 };
 use rs_matter::data_model::cluster_on_off::{Commands, OnOffCluster};
 use rs_matter::error::Error;
-use rs_matter::mdns::MdnsService;
-use rs_matter::mdns::builtin::MDNS_SOCKET_BIND_ADDR;
+use rs_matter::mdns::{Host, MDNS_SOCKET_BIND_ADDR, MdnsService};
 use rs_matter::secure_channel::spake2p::VerifierData;
 use rs_matter::tlv::TLVElement;
 use rs_matter::transport::exchange::Exchange;
@@ -213,15 +212,6 @@ fn run_matter() -> Result<(), ()> {
     let (ipv6_addr, interface) = initialize_network()
         .expect("Error getting network interface and IP addresses");
 
-    let mdns_service: &'static MdnsService = MDNS.init(MdnsService::new(
-        0,
-        "rs-matter-demo",
-        Ipv4Addr::UNSPECIFIED.octets(),
-        Some((ipv6_addr.octets(), interface)),
-        &DEV_DET,
-        MATTER_PORT,
-    ));
-
     // Get Device attestation (hard-coded atm)
     let dev_att: &'static HardCodedDevAtt = DEV_ATT.init(HardCodedDevAtt::new());
 
@@ -233,7 +223,7 @@ fn run_matter() -> Result<(), ()> {
         // vid/pid should match those in the DAC
         &DEV_DET,
         dev_att,
-        mdns_service,
+        MdnsService::Builtin,
         epoch,
         rand,
         MATTER_PORT,
@@ -243,7 +233,7 @@ fn run_matter() -> Result<(), ()> {
     static EXECUTOR: StaticCell<embassy_executor_riot::Executor> = StaticCell::new();
     let executor: &'static mut _ = EXECUTOR.init(embassy_executor_riot::Executor::new());
     executor.run(|spawner| {
-        spawner.spawn(mdns_task(mdns_service)).unwrap();
+        spawner.spawn(mdns_task(matter, ipv6_addr, interface)).unwrap();
         spawner.spawn(matter_task(matter)).unwrap();
         spawner.spawn(psm_task(matter)).unwrap();
     });
@@ -257,16 +247,15 @@ fn main() {
         unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
     }
 
-    init_logger(LevelFilter::Info).expect("Error initializing logger");
+    init_logger(LevelFilter::Debug).expect("Error initializing logger");
     let mut clock = ztimer::Clock::msec();
     clock.delay_ms(1000);
 
     info!("Hello Matter on RIOT!");
 
     use core::mem::size_of;
-    info!("Matter memory usage: UdpBuffers={}, PacketBuffers={}, \
+    info!("Matter memory usage: PacketBuffers={}, \
         MdnsService={}, Matter={}",
-        size_of::<UdpBuffers>(),
         size_of::<PacketBuffers>(),
         size_of::<MdnsService>(),
         size_of::<Matter>(),
@@ -305,7 +294,7 @@ fn main() {
 }
 
 #[embassy_executor::task]
-async fn mdns_task(mdns: &'static MdnsService<'_>) {
+async fn mdns_task(matter: &'static Matter<'_>, host_addr: Ipv6Addr, interface: u32) {
     // Create UDP socket and bind to port 5353
     static UDP_MDNS_SOCKET: StaticCell<riot_sys::sock_udp_t> = StaticCell::new();
     let udp_stack = riot_wrappers::socket_embedded_nal_async_udp::UdpStack::new(|| UDP_MDNS_SOCKET.try_uninit());
@@ -313,16 +302,22 @@ async fn mdns_task(mdns: &'static MdnsService<'_>) {
         .bind_single(MDNS_SOCKET_BIND_ADDR)
         .await
         .expect("Can't create a socket");
+
     let socket = UdpSocketWrapper::new(mdns_addr, mdns_sock);
     debug!("Created UDP socket for mDNS at {:?}", &mdns_addr);
 
     // Finally run the MDNS service
-    let mut mdns_udp_buffers = UdpBuffers::new();
-    let mdns_runner = pin!(mdns.run(
+    let mdns_runner = pin!(matter.run_builtin_mdns(
         &socket,
         &socket,
-        &mut mdns_udp_buffers)
-    );
+        Host {
+            id: 0,
+            hostname: "rs-matter-demo",
+            ip: Ipv4Addr::UNSPECIFIED.octets(),
+            ipv6: Some(host_addr.octets())
+        },
+        Some(interface)
+    ));
 
     debug!("Starting MDNS....");
     match mdns_runner.await {
@@ -349,14 +344,12 @@ async fn matter_task(matter: &'static Matter<'_>) {
 
     let handler = HandlerCompat(matter_handler(&matter));
 
-    let mut matter_udp_buffers = UdpBuffers::new();
     let mut matter_packet_buffers = PacketBuffers::new();
 
     // Finally create the Matter service and run on port 5540/UDP
     let matter_runner = pin!(matter.run(
         &socket,
         &socket,
-        &mut matter_udp_buffers,
         &mut matter_packet_buffers,
         CommissioningData {
             // TODO: Hard-coded for now

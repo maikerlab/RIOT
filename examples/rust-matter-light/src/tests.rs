@@ -3,10 +3,10 @@ use log::{debug, error, info, LevelFilter};
 use riot_wrappers::socket_embedded_nal_async_udp::UnconnectedUdpSocket;
 use rs_matter::error::Error;
 use rs_matter::transport::core::MATTER_SOCKET_BIND_ADDR;
-use rs_matter::transport::network::{UdpReceive, UdpSend};
 use static_cell::StaticCell;
 use core::str;
 use riot_wrappers::error::{EAGAIN, NumericError};
+use rs_matter::transport::network::{Address, NetworkReceive, NetworkSend};
 use crate::init_logger;
 use crate::network::UdpSocketWrapper;
 use crate::network::utils::initialize_network;
@@ -21,8 +21,8 @@ fn run_tests() -> ! {
     });
 }
 
-async fn udp_send<S>(mut send: S, data: &mut [u8], remote_addr: SocketAddr) -> Result<(), NumericError>
-    where S: UdpSend {
+async fn udp_send<S>(mut send: S, data: &mut [u8], remote_addr: Address) -> Result<(), NumericError>
+    where S: NetworkSend {
     //let mut buffer: &mut [u8] = &mut [0u8; 255usize];
     return match send.send_to(data, remote_addr).await {
         Ok(_) => {
@@ -36,8 +36,8 @@ async fn udp_send<S>(mut send: S, data: &mut [u8], remote_addr: SocketAddr) -> R
     }
 }
 
-async fn udp_receive<R>(mut recv: R) -> Result<(SocketAddr, [u8; 255], usize), NumericError>
-    where R: UdpReceive
+async fn udp_receive<R>(mut recv: R) -> Result<(Address, [u8; 255], usize), NumericError>
+    where R: NetworkReceive
 {
     let mut buffer: [u8; 255] = [0u8; 255usize];
     return match recv.recv_from(&mut buffer).await {

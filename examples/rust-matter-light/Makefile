@@ -37,7 +37,8 @@ USEMODULE += ztimer
 USEMODULE += ztimer_msec
 USEMODULE += ztimer_usec
 USEMODULE += ps
-USEMODULE += vfs
+USEMODULE += vfs_default
+USEMODULE += constfs
 
 # networking
 USEMODULE += netdev_default
