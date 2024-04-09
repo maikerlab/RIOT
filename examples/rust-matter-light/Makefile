@@ -27,19 +27,24 @@ APPLICATION_RUST_MODULE = rust_matter_light
 BASELIBS += $(APPLICATION_RUST_MODULE).module
 
 FEATURES_REQUIRED += rust_target
+FEATURES_REQUIRED += periph_eth
 
-USEMODULE += saul
+# SAUL
 USEMODULE += saul_default
-USEMODULE += shell
-USEMODULE += shell_cmds_default
-USEMODULE += shell_cmd_heap
-USEMODULE += ztimer
-USEMODULE += ztimer_msec
+
+# Ztimer
 USEMODULE += ztimer_usec
 USEMODULE += ps
-USEMODULE += vfs
 
-# networking
+# VFS
+USEMODULE += vfs_default
+USEMODULE += constfs
+#SLOT_AUX_LEN := 0x8000
+#USEMODULE += mtd_flashpage
+#USEPKG += littlefs2
+USEMODULE += sdcard_spi
+
+# Socket API and Network Stack
 USEMODULE += netdev_default
 USEMODULE += auto_init_gnrc_netif
 USEMODULE += gnrc_ipv6_default
@@ -48,5 +53,9 @@ USEMODULE += gnrc_icmpv6_error
 USEMODULE += sock_udp
 USEMODULE += sock_async
 USEMODULE += sock_aux_local
+
+# Shell
+USEMODULE += shell_cmds_default
+USEMODULE += shell_cmd_heap
 
 include $(RIOTBASE)/Makefile.include

@@ -43,8 +43,10 @@ use riot_wrappers::ztimer;
 use riot_wrappers::thread;
 use riot_wrappers::mutex::Mutex;
 use riot_wrappers::cstr::cstr;
+use riot_wrappers::error::NumericError;
 use riot_wrappers::shell::{self, CommandList};
 use riot_wrappers::saul::{ActuatorClass, Class, Phydat, RegistryEntry};
+use riot_wrappers::vfs::{File, FileMode, Mount, SeekFrom};
 
 // rs-matter
 #[allow(unused_variables)]
@@ -190,7 +192,33 @@ fn led_onoff(on: bool) {
     warn!("LED {} was not found in SAUL registry!", ONOFF_LED_NAME);
 }
 
+const BUF_SIZE: usize = 10;
+
 fn cmd_matter(_stdio: &mut riot_wrappers::stdio::Stdio, _args: shell::Args<'_>) {
+    let mut mountpoints = Mount::all();
+    loop {
+        match mountpoints.next() {
+            None => { break; }
+            Some(mp) => {
+                info!("Mountpoint: {}", mp.mount_point());
+            }
+        }
+    }
+    //let f = File::open("/const/dac-pubkey");
+    let f = File::open_with_mode("/nvm0/test123", FileMode::ReadWrite(false));
+    match f {
+        Ok(mut f) => {
+            let data = "hello".as_bytes();
+            f.write(&data).expect("Error writing to file");
+            info!("Write success!");
+            f.seek(SeekFrom::Start(0)).expect("asd");
+            let mut content: [u8; BUF_SIZE] = [0; BUF_SIZE];
+            f.read(&mut content).expect("Error reading from file");
+            info!("DAC Pubkey: {:?}", content);
+        }
+        Err(_) => { error!("Error opening pubkey"); }
+    }
+    return;
     // TODO: Support some useful commands for this Matter node or interacting with other nodes
     info!("Endpoint Info:");
     NODE.endpoints.into_iter().for_each(|ep| {
@@ -215,7 +243,7 @@ fn run_matter() -> Result<(), ()> {
 
     let mdns_service: &'static MdnsService = MDNS.init(MdnsService::new(
         0,
-        "rs-matter-demo",
+        "riot-matter-demo",
         Ipv4Addr::UNSPECIFIED.octets(),
         Some((ipv6_addr.octets(), interface)),
         &DEV_DET,
@@ -262,6 +290,11 @@ fn main() {
     clock.delay_ms(1000);
 
     info!("Hello Matter on RIOT!");
+
+    extern "C" {
+        fn do_vfs_init();
+    }
+    unsafe { do_vfs_init(); };
 
     use core::mem::size_of;
     info!("Matter memory usage: UdpBuffers={}, PacketBuffers={}, \
@@ -332,7 +365,7 @@ async fn mdns_task(mdns: &'static MdnsService<'_>) {
         Err(err) => {
             error!("MDNS terminated with error: {:?}", err);
         }
-    }
+    };
 }
 
 #[embassy_executor::task]
@@ -352,17 +385,19 @@ async fn matter_task(matter: &'static Matter<'_>) {
     let mut matter_udp_buffers = UdpBuffers::new();
     let mut matter_packet_buffers = PacketBuffers::new();
 
+    let dev_comm = CommissioningData {
+        // TODO: Hard-coded for now
+        verifier: VerifierData::new_with_pw(123456, *matter.borrow()),
+        discriminator: 250,
+    };
+
     // Finally create the Matter service and run on port 5540/UDP
     let matter_runner = pin!(matter.run(
         &socket,
         &socket,
         &mut matter_udp_buffers,
         &mut matter_packet_buffers,
-        CommissioningData {
-            // TODO: Hard-coded for now
-            verifier: VerifierData::new_with_pw(123456, *matter.borrow()),
-            discriminator: 250,
-        },
+        dev_comm,
         &handler)
     );
     let matter_runner = pin!(matter_runner);
